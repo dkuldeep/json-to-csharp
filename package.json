@@ -1,0 +1,59 @@
+{
+  "name": "json-to-csharp",
+  "version": "0.1.0",
+  "description": "Generate C# classes or records from JSON, with System.Text.Json or Newtonsoft attributes and nullable reference types.",
+  "keywords": [
+    "json",
+    "csharp",
+    "c#",
+    "dotnet",
+    "codegen",
+    "class",
+    "record",
+    "poco",
+    "dto",
+    "system.text.json",
+    "newtonsoft",
+    "json2csharp"
+  ],
+  "homepage": "https://jsonbite.com/json-to-csharp",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dkuldeep/json-to-csharp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dkuldeep/json-to-csharp/issues"
+  },
+  "license": "MIT",
+  "author": "Kuldeep",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "json-to-csharp": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc",
+    "test": "npm run build && node --test test/",
+    "prepublishOnly": "npm test"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "typescript": "^5.6.3"
+  }
+}
