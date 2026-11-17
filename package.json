@@ -36,7 +36,7 @@
     }
   },
   "bin": {
-    "json-to-csharp": "./dist/cli.js"
+    "json-to-csharp": "dist/cli.js"
   },
   "files": [
     "dist",
