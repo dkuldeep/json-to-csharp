@@ -43,72 +43,142 @@ function toPascalCase(key: string): string {
     return s;
 }
 
-function singularize(s: string): string {
-    if (s.endsWith("ies")) return s.slice(0, -3) + "y";
-    if (s.endsWith("s") && !s.endsWith("ss")) return s.slice(0, -1);
-    return s + "Item";
+const IRREGULAR: Record<string, string> = {
+    children: "child", people: "person", men: "man", women: "woman", mice: "mouse",
+    geese: "goose", feet: "foot", teeth: "tooth", indices: "index", matrices: "matrix",
+    vertices: "vertex", analyses: "analysis", criteria: "criterion", phenomena: "phenomenon",
+};
+// Words that look plural/singular but aren't handled by the suffix rules below.
+const IE_WORDS = /(movie|cookie|zombie|selfie|calorie|rookie|hoodie|genie|pie|tie|lie)s$/i;
+const US_ES = /(status|virus|bonus|campus|bus|focus|census|corpus|prospectus|alias|canvas)es$/i;
+const NO_PLURAL = /(news|series|species|status|address|analysis|class|data|info|metadata)$/i;
+
+function singularize(word: string): string {
+    // Only the last camelCase / snake_case segment is plural: "userAddresses" → "userAddress".
+    const m = /^(.*?)([A-Z]?[a-z]+|[A-Z]+)$/.exec(word);
+    const head = m ? m[1] : "";
+    const tail = m ? m[2] : word;
+    const lower = tail.toLowerCase();
+    const keepCase = (sing: string) => (tail[0] === tail[0].toUpperCase() ? sing.charAt(0).toUpperCase() + sing.slice(1) : sing);
+
+    let sing: string | null = null;
+    if (IRREGULAR[lower]) sing = IRREGULAR[lower];
+    else if (IE_WORDS.test(lower)) sing = lower.slice(0, -1);
+    else if (US_ES.test(lower)) sing = lower.slice(0, -2);
+    else if (NO_PLURAL.test(lower)) sing = null;
+    else if (lower.endsWith("ies") && lower.length > 4) sing = lower.slice(0, -3) + "y";
+    else if (/(ss|x|z|ch|sh)es$/.test(lower) && !/(cach|nich|ach)es$/.test(lower)) sing = lower.slice(0, -2);
+    else if (lower.endsWith("s") && !lower.endsWith("ss") && !lower.endsWith("us") && !lower.endsWith("is")) sing = lower.slice(0, -1);
+
+    return sing === null ? word + "Item" : head + keepCase(sing);
 }
+
+// Class names that would shadow a type the generated code (or most C# code) relies on.
+const RESERVED_TYPES = new Set([
+    "System", "Object", "String", "DateTime", "DateTimeOffset", "TimeSpan", "Guid", "Uri", "Type", "Task",
+    "Exception", "Attribute", "Math", "Console", "Convert", "Enum", "Nullable", "Action", "Func", "Version",
+    "JsonPropertyName", "JsonProperty", "JsonConvert", "JsonSerializer", "Newtonsoft",
+]);
 
 function csString(s: string): string {
     return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
-function isObject(v: JsonVal): v is { [k: string]: JsonVal } {
+type Obj = { [k: string]: JsonVal };
+type ClassInfo = { base: string; signature: string; fields: CsField[] };
+type Ctx = Map<string, ClassInfo>;
+
+function isObject(v: JsonVal): v is Obj {
     return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 
-function getType(val: JsonVal, hint: string, out: Map<string, CsField[]>): string {
-    if (typeof val === "boolean") return "bool";
-    if (typeof val === "number") {
-        if (Number.isInteger(val)) return val >= -2147483648 && val <= 2147483647 ? "int" : "long";
-        return "double";
+function primitiveType(v: boolean | number | string): string {
+    if (typeof v === "boolean") return "bool";
+    if (typeof v === "number") {
+        if (!Number.isInteger(v)) return "double";
+        return v >= -2147483648 && v <= 2147483647 ? "int" : "long";
     }
-    if (typeof val === "string") return ISO_DATE.test(val) ? "DateTime" : "string";
-
-    if (Array.isArray(val)) {
-        if (val.length === 0) return "List<object>";
-        if (val.every(isObject)) {
-            const itemName = toPascalCase(singularize(hint));
-            buildClass(val as { [k: string]: JsonVal }[], itemName, out);
-            return `List<${itemName}>`;
-        }
-        const types = [...new Set(val.filter(v => v !== null).map(v => getType(v, hint + "Item", out)))];
-        return types.length === 1 ? `List<${types[0]}>` : "List<object>";
-    }
-
-    const className = toPascalCase(hint);
-    buildClass([val as { [k: string]: JsonVal }], className, out);
-    return className;
+    return ISO_DATE.test(v) ? "DateTime" : "string";
 }
 
-function buildClass(samples: { [k: string]: JsonVal }[], name: string, out: Map<string, CsField[]>): void {
-    if (out.has(name)) return;
-    out.set(name, []); // placeholder to prevent infinite recursion
+// Combine the types seen at one position: int + long → long, any number + double → double,
+// DateTime + string → string. Anything else that disagrees becomes object.
+function widen(types: Set<string>): string {
+    if (types.size === 1) return [...types][0];
+    const all = (allowed: string[]) => [...types].every(t => allowed.includes(t));
+    if (all(["int", "long"])) return "long";
+    if (all(["int", "long", "double"])) return "double";
+    if (all(["string", "DateTime"])) return "string";
+    return "object";
+}
 
-    const allKeys = [...new Set(samples.flatMap(s => Object.keys(s)))];
-    const used = new Set<string>();
-    const fields: CsField[] = [];
+/**
+ * Infer one C# type for every (non-null) value seen at the same position, e.g. the values of
+ * `author` across all elements of `posts`. Objects are merged into one class; arrays are
+ * flattened so their elements are merged too.
+ */
+function inferType(values: JsonVal[], hint: string, parent: string, ctx: Ctx, nrt: boolean): string {
+    if (values.length === 0) return "object";
 
-    for (const key of allKeys) {
-        const vals = samples.map(s => (key in s ? s[key] : undefined));
-        const defined = vals.filter(v => v !== undefined) as JsonVal[];
+    if (values.every(isObject)) return buildClass(values as Obj[], toPascalCase(hint), parent, ctx, nrt);
+
+    if (values.every(Array.isArray)) {
+        const elems = (values as JsonVal[][]).flat();
+        const nonNull = elems.filter(v => v !== null);
+        if (nonNull.length === 0) return "List<object>";
+        // Nested arrays keep the hint so names don't pile up suffixes ("GridItemItem").
+        const itemHint = nonNull.every(Array.isArray) ? hint : singularize(hint);
+        const item = inferType(nonNull, itemHint, parent, ctx, nrt);
+        const hasNull = nonNull.length < elems.length && item !== "object";
+        return `List<${hasNull && (VALUE_TYPES.has(item) || nrt) ? item + "?" : item}>`;
+    }
+
+    if (values.some(v => typeof v === "object")) return "object"; // mix of objects, arrays, primitives
+    return widen(new Set(values.map(v => primitiveType(v as boolean | number | string))));
+}
+
+/** Build (or reuse) a class for these object samples and return its name. */
+function buildClass(samples: Obj[], base: string, parent: string, ctx: Ctx, nrt: boolean): string {
+    if (RESERVED_TYPES.has(base)) base += "Model";
+
+    // Reserve a unique name first so it's ordered before its nested classes and
+    // nested classes can't take it.
+    let name = base;
+    if (ctx.has(name)) name = parent && !parent.endsWith(base) ? parent + base : base;
+    for (let i = 2; ctx.has(name); i++) name = `${base}${i}`;
+    ctx.set(name, { base, signature: "", fields: [] });
+
+    const keys = [...new Set(samples.flatMap(s => Object.keys(s)))];
+    const raw = keys.map(key => {
+        const defined = samples.filter(s => key in s).map(s => s[key]);
         const nonNull = defined.filter(v => v !== null);
-        const nullable = defined.length < vals.length || defined.length !== nonNull.length;
+        const type = inferType(nonNull, key, name, ctx, nrt);
+        const nullable = defined.length < samples.length || nonNull.length < defined.length || type === "object";
+        return { jsonKey: key, type, nullable };
+    });
+    const signature = JSON.stringify(raw);
 
-        const types = [...new Set(nonNull.map(v => getType(v, key, out)))];
-        const type = types.length === 1 ? types[0] : "object";
+    // The same shape at another position (e.g. billing / shipping address) reuses one class.
+    for (const [other, info] of ctx) {
+        if (other !== name && info.base === base && info.signature === signature) {
+            ctx.delete(name);
+            return other;
+        }
+    }
 
-        // C# forbids a member named like its enclosing type (CS0542), and names must be unique.
-        let prop = toPascalCase(key);
+    // C# forbids a member named like its enclosing type (CS0542), and names must be unique.
+    const used = new Set<string>();
+    const fields = raw.map(f => {
+        let prop = toPascalCase(f.jsonKey);
         if (prop === name) prop += "Value";
         let unique = prop;
         for (let i = 2; used.has(unique); i++) unique = `${prop}${i}`;
         used.add(unique);
+        return { ...f, name: unique };
+    });
 
-        fields.push({ jsonKey: key, name: unique, type, nullable: nullable || type === "object" });
-    }
-
-    out.set(name, fields);
+    ctx.set(name, { base, signature, fields });
+    return name;
 }
 
 function attrFor(f: CsField, attrs: Attributes): string {
@@ -167,22 +237,19 @@ export function jsonToCSharp(json: string | unknown, options: Options = {}): str
     const { rootName = "Root", style = "class", attributes = "none", nullable = true, namespace } = options;
 
     const parsed = (typeof json === "string" ? JSON.parse(json) : json) as JsonVal;
-    const out = new Map<string, CsField[]>();
+    const ctx: Ctx = new Map();
     const root = toPascalCase(rootName) || "Root";
 
-    if (Array.isArray(parsed)) {
-        if (parsed.length === 0 || !parsed.every(isObject)) {
-            throw new TypeError("Input must be a JSON object or a non-empty array of objects.");
-        }
-        buildClass(parsed as { [k: string]: JsonVal }[], root, out);
-    } else if (isObject(parsed)) {
-        buildClass([parsed], root, out);
+    if (isObject(parsed)) {
+        buildClass([parsed], root, "", ctx, nullable);
+    } else if (Array.isArray(parsed) && parsed.length > 0 && parsed.every(isObject)) {
+        buildClass(parsed as Obj[], root, "", ctx, nullable);
     } else {
         throw new TypeError("Input must be a JSON object or a non-empty array of objects.");
     }
 
-    const body = [...out]
-        .map(([name, fields]) => (style === "record" ? renderRecord(name, fields, attributes, nullable) : renderClass(name, fields, attributes, nullable)))
+    const body = [...ctx]
+        .map(([name, { fields }]) => (style === "record" ? renderRecord(name, fields, attributes, nullable) : renderClass(name, fields, attributes, nullable)))
         .join("\n\n");
 
     const usings: string[] = [];

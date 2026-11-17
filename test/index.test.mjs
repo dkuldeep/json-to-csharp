@@ -86,3 +86,51 @@ test("CLI reads stdin and applies options", () => {
     const out = execFileSync("node", ["dist/cli.js", "-n", "User", "-r", "-a", "stj"], { input: '{"id":1,"first_name":"A"}' }).toString();
     assert.match(out, /public record User\(\n    \[property: JsonPropertyName\("id"\)\] int Id,/);
 });
+
+test("same key with different shapes gets distinct classes; same shape is reused", () => {
+    const cs = jsonToCSharp({ a: { data: { x: 1 } }, b: { data: { y: "s" } }, c: { data: { x: 2 } } });
+    assert.match(cs, /public class A\n\{\n    public Data Data/);
+    assert.match(cs, /public class B\n\{\n    public BData Data/);
+    assert.match(cs, /public class C\n\{\n    public Data Data/);
+    assert.match(cs, /public class BData\n\{\n    public string Y/);
+    assert.equal(cs.match(/public class Data\b/g).length, 1);
+});
+
+test("nested objects inside array elements are merged", () => {
+    const cs = jsonToCSharp({ posts: [{ author: { name: "a" } }, { author: { id: 1 } }] });
+    assert.match(cs, /public class Author\n\{\n    public string\? Name \{ get; set; \}\n\n    public int\? Id/);
+});
+
+test("numbers widen across samples", () => {
+    const cs = jsonToCSharp([{ d: 1, l: 1, s: "2024-05-01T10:30:00Z", n: [1, 2.5] }, { d: 1.5, l: 9999999999, s: "x", n: [3] }]);
+    assert.match(cs, /public double D/);
+    assert.match(cs, /public long L/);
+    assert.match(cs, /public string S/);
+    assert.match(cs, /public List<double> N/);
+});
+
+test("nested key matching the root name doesn't make the root recursive", () => {
+    assert.match(jsonToCSharp({ root: { x: 1 } }), /public Root2 RootValue[\s\S]*public class Root2\n\{\n    public int X/);
+});
+
+test("singularizes list item names", () => {
+    const keys = { statuses: "Status", addresses: "Address", categories: "Category", children: "Child", people: "Person",
+        movies: "Movie", caches: "Cache", lineItems: "LineItem", news: "NewsItem", status: "StatusItem" };
+    const cs = jsonToCSharp(Object.fromEntries(Object.keys(keys).map(k => [k, [{ a: 1 }]])));
+    for (const [k, item] of Object.entries(keys)) assert.ok(cs.includes(`List<${item}> `), `${k} → ${item}`);
+});
+
+test("avoids class names that shadow .NET types", () => {
+    const cs = jsonToCSharp({ system: { a: 1 }, dateTime: { b: 1 }, when: "2024-05-01T10:30:00Z" });
+    assert.match(cs, /public SystemModel System/);
+    assert.match(cs, /public DateTimeModel DateTime/);
+    assert.match(cs, /public DateTime When/);
+});
+
+test("arrays of arrays and nulls inside lists", () => {
+    const cs = jsonToCSharp({ grid: [[{ a: 1 }], [{ b: 2 }]], ids: [1, null], names: ["a", null] });
+    assert.match(cs, /public List<List<GridItem>> Grid/);
+    assert.match(cs, /public class GridItem\n\{\n    public int\? A \{ get; set; \}\n\n    public int\? B/);
+    assert.match(cs, /public List<int\?> Ids/);
+    assert.match(cs, /public List<string\?> Names/);
+});

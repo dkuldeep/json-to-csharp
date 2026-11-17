@@ -92,11 +92,17 @@ public class Post
 | ISO 8601 string (`2024-05-01T10:30:00Z`) | `DateTime` |
 | other string | `string` |
 | object | its own class, named after the key |
-| array of objects | `List<T>`, with `T` named after the singularized key (`posts` → `Post`) |
-| array of primitives | `List<int>`, `List<string>`, … |
-| `null` only, or mixed types | `object?` |
+| array of objects | `List<T>`, with `T` named after the singularized key (`posts` → `Post`, `categories` → `Category`, `children` → `Child`) |
+| array of primitives | `List<int>`, `List<string>`, … (`List<int?>` if it contains `null`) |
+| `null` only, or incompatible types | `object?` |
 
-Arrays of objects are merged, so a field present in only some elements becomes nullable. Property names are PascalCased (`zip_code` → `ZipCode`), de-duplicated, and never clash with their enclosing type's name.
+All values seen at the same position are merged before a type is picked:
+
+- **Objects** — every element of an array, and objects nested inside them, are merged into one class. A field missing from some samples or `null` in any becomes nullable.
+- **Numbers** widen: `int` + `long` → `long`, any number + decimal → `double`. A date in one sample and plain text in another → `string`.
+- **Names** stay unique: the same key with a different shape elsewhere gets a prefixed class (`Data`, `BData`), while an identical shape reuses one class. Names that would shadow .NET types get a `Model` suffix (`SystemModel`).
+
+Property names are PascalCased (`zip_code` → `ZipCode`), de-duplicated, and never clash with their enclosing type's name.
 
 ## CLI
 
